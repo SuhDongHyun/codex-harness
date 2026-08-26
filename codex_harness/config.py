@@ -34,6 +34,8 @@ class HarnessConfig:
     max_event_bytes: int = 1_000_000
     max_result_bytes: int = 100_000
     max_verification_bytes: int = 100_000
+    max_retry_context_bytes: int = 8_192
+    max_handoff_bytes: int = 16_384
     executor_network: bool = False
     sandbox_verification: bool = True
     planner: ModelProfile = ModelProfile("gpt-5.6-terra", "medium")
@@ -60,6 +62,8 @@ class HarnessConfig:
             "max_event_bytes",
             "max_result_bytes",
             "max_verification_bytes",
+            "max_retry_context_bytes",
+            "max_handoff_bytes",
             "executor_network",
             "sandbox_verification",
         }
@@ -80,6 +84,10 @@ class HarnessConfig:
             max_verification_bytes=_integer_option(
                 harness, "max_verification_bytes", 100_000
             ),
+            max_retry_context_bytes=_integer_option(
+                harness, "max_retry_context_bytes", 8_192
+            ),
+            max_handoff_bytes=_integer_option(harness, "max_handoff_bytes", 16_384),
             executor_network=_boolean_option(harness, "executor_network", False),
             sandbox_verification=_boolean_option(harness, "sandbox_verification", True),
             planner=_profile(raw["planner"], "planner"),
@@ -109,6 +117,13 @@ class HarnessConfig:
                 1024,
                 1_000_000,
             ),
+            (
+                "max_retry_context_bytes",
+                self.max_retry_context_bytes,
+                1024,
+                100_000,
+            ),
+            ("max_handoff_bytes", self.max_handoff_bytes, 1024, 100_000),
         ):
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ValidationError(f"harness.{name} must be an integer")

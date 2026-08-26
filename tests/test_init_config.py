@@ -42,6 +42,8 @@ class InitAndConfigTests(unittest.TestCase):
             self.assertEqual(json.loads(version.stdout)["version"], "0.1.0")
             config = HarnessConfig.load(project / ".harness/config.toml")
             self.assertEqual(config.max_attempts, 3)
+            self.assertEqual(config.max_retry_context_bytes, 8_192)
+            self.assertEqual(config.max_handoff_bytes, 16_384)
             self.assertFalse(config.executor_network)
 
     def test_refuses_to_overwrite_custom_file(self) -> None:

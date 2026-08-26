@@ -69,7 +69,10 @@ which changes should be retained.
 
 - sequential tasks only;
 - bounded event and final-result files;
-- one previous handoff, never a growing summary list;
+- one previous handoff with a configurable total byte limit, never a growing
+  summary list;
+- bounded retry failure context while full verification evidence remains on
+  disk;
 - medium reasoning by default;
 - configurable higher reasoning for retries;
 - aggregate usage recorded in `state.json`.
