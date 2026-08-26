@@ -14,6 +14,8 @@ verification_timeout_seconds = 900
 max_event_bytes = 1000000
 max_result_bytes = 100000
 max_verification_bytes = 100000
+max_retry_context_bytes = 8192
+max_handoff_bytes = 16384
 executor_network = false
 sandbox_verification = true
 

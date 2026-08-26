@@ -3,17 +3,27 @@ from __future__ import annotations
 import re
 import secrets
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 from .config import HarnessConfig, ModelProfile
+from .context import bounded_text, build_handoff
 from .errors import HarnessError, ValidationError
 from .git_guard import GitGuard, GitSnapshot
 from .models import Plan, Task, TaskReport, add_usage
 from .prompts import agent_failure, planning_prompt, task_prompt
 from .runner import AgentRequest, AgentResult, AgentRunner
+from .state import RunState, TaskState, new_state, parse_state, task_state
 from .store import RunStore, now_iso
-from .verifier import VerificationResult, VerificationRunner
+from .verifier import VerificationRunner
+
+
+@dataclass(frozen=True)
+class _AttemptContext:
+    number: int
+    before: GitSnapshot
+    request: AgentRequest
 
 
 class HarnessController:
@@ -82,8 +92,8 @@ class HarnessController:
         if plan.goal != clean_goal:
             raise HarnessError("planner changed the requested goal")
         self.store.write_json(run_id, "plan.json", plan.to_dict())
-        state = _new_state(run_id, plan)
-        add_usage(_usage(state), result.usage)
+        state = new_state(run_id, plan)
+        add_usage(state["usage"], result.usage)
         self._write_state(state)
         self.store.append_event(
             run_id,
@@ -96,7 +106,7 @@ class HarnessController:
         )
         return run_id
 
-    def approve(self, run_id: str) -> dict[str, object]:
+    def approve(self, run_id: str) -> RunState:
         with self.store.lock(run_id):
             state = self.status(run_id)
             if state["status"] != "draft":
@@ -112,12 +122,10 @@ class HarnessController:
                     f"tasks request network ({requested}) but executor_network is false"
                 )
             snapshot = self.git.snapshot()
-            state.update(
-                status="approved",
-                plan_sha256=plan.sha256(),
-                workspace_snapshot=snapshot.to_dict(),
-                updated_at=now_iso(),
-            )
+            state["status"] = "approved"
+            state["plan_sha256"] = plan.sha256()
+            state["workspace_snapshot"] = snapshot.to_dict()
+            state["updated_at"] = now_iso()
             self._write_state(state)
             self.store.append_event(
                 run_id,
@@ -152,7 +160,7 @@ class HarnessController:
                         f"engine ({engine}): {pattern}"
                     )
 
-    def run(self, run_id: str) -> dict[str, object]:
+    def run(self, run_id: str) -> RunState:
         with self.store.lock(run_id):
             state = self.status(run_id)
             plan = self._plan(run_id)
@@ -163,12 +171,13 @@ class HarnessController:
             current = self.git.snapshot()
             if expected.fingerprint != current.fingerprint:
                 raise HarnessError("project changed after approval")
-            state.update(status="running", updated_at=now_iso())
+            state["status"] = "running"
+            state["updated_at"] = now_iso()
             self._write_state(state)
             self.store.append_event(run_id, {"type": "run.started"})
             return self._execute(run_id, state, plan)
 
-    def resume(self, run_id: str) -> dict[str, object]:
+    def resume(self, run_id: str) -> RunState:
         with self.store.lock(run_id):
             state = self.status(run_id)
             plan = self._plan(run_id)
@@ -178,8 +187,8 @@ class HarnessController:
             current_task_id = state.get("current_task")
             if isinstance(current_task_id, str):
                 task = _task_by_id(plan, current_task_id)
-                task_state = _task_state(state, current_task_id)
-                raw_before = task_state.get("attempt_snapshot") or task_state.get(
+                current_state = task_state(state, current_task_id)
+                raw_before = current_state.get("attempt_snapshot") or current_state.get(
                     "baseline_snapshot"
                 )
                 if raw_before is None:
@@ -190,10 +199,10 @@ class HarnessController:
                 )
                 if error:
                     raise HarnessError(f"cannot resume safely: {error}")
-                if task_state["status"] == "running":
-                    task_state.update(
-                        status="retrying",
-                        error="controller process was interrupted during execution",
+                if current_state["status"] == "running":
+                    current_state["status"] = "retrying"
+                    current_state["error"] = (
+                        "controller process was interrupted during execution"
                     )
                     self._write_state(state)
             else:
@@ -208,7 +217,7 @@ class HarnessController:
             self.store.append_event(run_id, {"type": "run.resumed"})
             return self._execute(run_id, state, plan)
 
-    def retry_task(self, run_id: str, target: str) -> dict[str, object]:
+    def retry_task(self, run_id: str, target: str) -> RunState:
         with self.store.lock(run_id):
             state = self.status(run_id)
             plan = self._plan(run_id)
@@ -227,21 +236,19 @@ class HarnessController:
                 task = _task_by_id(plan, target)
                 if state.get("current_task") != target:
                     raise HarnessError(f"{target} is not the failed or blocked task")
-                task_state = _task_state(state, target)
-                if task_state["status"] not in {"failed", "blocked"}:
+                current_state = task_state(state, target)
+                if current_state["status"] not in {"failed", "blocked"}:
                     raise HarnessError(f"{target} is not failed or blocked")
                 allowed = task.write_paths
-                task_state.update(
-                    status="pending",
-                    attempts=0,
-                    retry_profile=True,
-                    error=None,
-                    summary=None,
-                    candidate_report=None,
-                    baseline_snapshot=None,
-                    attempt_snapshot=None,
-                    changed_files=[],
-                )
+                current_state["status"] = "pending"
+                current_state["attempts"] = 0
+                current_state["retry_profile"] = True
+                current_state["error"] = None
+                current_state["summary"] = None
+                current_state["candidate_report"] = None
+                current_state["baseline_snapshot"] = None
+                current_state["attempt_snapshot"] = None
+                current_state["changed_files"] = []
             if (
                 state.get("safety_violation") is True
                 and before.fingerprint != current.fingerprint
@@ -253,37 +260,32 @@ class HarnessController:
             error = self.git.safety_error(before, current, allowed)
             if error:
                 raise HarnessError(f"cannot retry safely: {error}")
-            state.update(
-                status="approved",
-                current_task=None,
-                failure_stage=None,
-                error=None,
-                blocked_reason=None,
-                required_action=None,
-                safety_violation=False,
-                workspace_snapshot=current.to_dict(),
-                updated_at=now_iso(),
-            )
+            state["status"] = "approved"
+            state["current_task"] = None
+            state["failure_stage"] = None
+            state["error"] = None
+            state["blocked_reason"] = None
+            state["required_action"] = None
+            state["safety_violation"] = False
+            state["workspace_snapshot"] = current.to_dict()
+            state["updated_at"] = now_iso()
             self._write_state(state)
             self.store.append_event(
                 run_id, {"type": "run.retry_approved", "target": target}
             )
             return state
 
-    def status(self, run_id: str) -> dict[str, object]:
+    def status(self, run_id: str) -> RunState:
         state = self.store.read_json(run_id, "state.json")
-        _validate_state(state, run_id)
-        return state
+        return parse_state(state, run_id)
 
-    def _execute(
-        self, run_id: str, state: dict[str, object], plan: Plan
-    ) -> dict[str, object]:
+    def _execute(self, run_id: str, state: RunState, plan: Plan) -> RunState:
         for index, task in enumerate(plan.tasks):
-            task_state = _task_state(state, task.id)
-            if task_state["status"] == "completed":
+            current_state = task_state(state, task.id)
+            if current_state["status"] == "completed":
                 continue
-            if task_state["status"] == "verifying":
-                outcome = self._verify_task(run_id, state, task, task_state)
+            if current_state["status"] == "verifying":
+                outcome = self._verify_task(run_id, state, task, current_state)
                 if outcome == "completed":
                     continue
                 if outcome == "terminal":
@@ -293,7 +295,7 @@ class HarnessController:
                 state,
                 plan,
                 task,
-                task_state,
+                current_state,
                 previous_task=plan.tasks[index - 1] if index else None,
             )
             if terminal:
@@ -303,134 +305,59 @@ class HarnessController:
     def _run_task(
         self,
         run_id: str,
-        state: dict[str, object],
+        state: RunState,
         plan: Plan,
         task: Task,
-        task_state: dict[str, object],
+        current_state: TaskState,
         *,
         previous_task: Task | None,
     ) -> bool:
-        last_error = task_state.get("error")
-        if not isinstance(last_error, str):
-            last_error = None
-        if _attempts(task_state) >= self.config.max_attempts:
+        last_error = current_state["error"]
+        if current_state["attempts"] >= self.config.max_attempts:
             self._fail_task(
                 state,
-                task_state,
+                current_state,
                 last_error or "interrupted task exhausted its attempt limit",
                 self.git.snapshot(),
             )
             return True
-        while _attempts(task_state) < self.config.max_attempts:
-            if task_state.get("baseline_snapshot") is None:
-                task_state["baseline_snapshot"] = self.git.snapshot().to_dict()
-            before = self.git.snapshot()
-            attempt = _attempts(task_state) + 1
-            task_state.update(
-                status="running",
-                attempts=attempt,
-                error=None,
-                attempt_snapshot=before.to_dict(),
-            )
-            state.update(status="running", current_task=task.id, updated_at=now_iso())
-            self._write_state(state)
-            profile = (
-                self.config.retry
-                if attempt > 1 or task_state.get("retry_profile") is True
-                else self.config.executor
-            )
-            previous_handoff = (
-                self.store.read_json(run_id, f"handoffs/{previous_task.id}.json")
-                if previous_task is not None
-                else None
-            )
-            request = self._task_request(
+        while current_state["attempts"] < self.config.max_attempts:
+            context = self._prepare_attempt(
                 run_id,
+                state,
                 plan,
                 task,
-                attempt,
-                profile,
-                previous_handoff,
+                current_state,
+                previous_task,
                 last_error,
             )
-            self.store.append_event(
-                run_id,
-                {
-                    "type": "task.started",
-                    "task": task.id,
-                    "attempt": attempt,
-                    "model": profile.model,
-                    "reasoning_effort": profile.reasoning_effort,
-                },
+            result, after, safety_error = self._run_attempt(
+                run_id, state, task, context
             )
-            result, metadata_error = self._run_agent_guarded(
-                run_id, request, f"evidence/{task.id}-attempt-{attempt:02d}.jsonl"
-            )
-            after = self.git.snapshot()
-            add_usage(_usage(state), result.usage)
-            self._write_agent_evidence(
+            outcome, last_error = self._evaluate_attempt(
                 run_id,
-                f"evidence/{task.id}-attempt-{attempt:02d}-agent.json",
-                request,
+                state,
+                task,
+                current_state,
+                context,
                 result,
-                changed_files=sorted(self.git.changed_paths(before, after)),
+                after,
+                safety_error,
             )
-            safety_error = metadata_error or self.git.safety_error(
-                before, after, task.write_paths
-            )
-            if safety_error:
-                self._fail_task(
-                    state,
-                    task_state,
-                    safety_error,
-                    before,
-                    safety_violation=True,
-                )
+            if outcome == "completed":
+                return False
+            if outcome == "terminal":
                 return True
-            if not result.succeeded:
-                last_error = _agent_failure(result)
-            else:
-                try:
-                    report = TaskReport.from_dict(result.payload)
-                except ValidationError as error:
-                    last_error = f"invalid task report: {error}"
-                else:
-                    if report.outcome == "blocked":
-                        self._block_task(state, task_state, report, after)
-                        return True
-                    if report.outcome == "failed":
-                        last_error = report.error or "Codex reported failure"
-                    else:
-                        task_state.update(
-                            status="verifying",
-                            candidate_report=report.to_dict(),
-                            changed_files=sorted(
-                                self.git.changed_paths(
-                                    GitSnapshot.from_dict(
-                                        task_state["baseline_snapshot"]
-                                    ),
-                                    after,
-                                )
-                            ),
-                        )
-                        self._write_state(state)
-                        outcome = self._verify_task(run_id, state, task, task_state)
-                        if outcome == "completed":
-                            return False
-                        if outcome == "terminal":
-                            return True
-                        last_error = str(
-                            task_state.get("error") or "verification failed"
-                        )
-            if attempt >= self.config.max_attempts:
+            if context.number >= self.config.max_attempts:
                 self._fail_task(
                     state,
-                    task_state,
+                    current_state,
                     last_error or "task failed without evidence",
                     after,
                 )
                 return True
-            task_state.update(status="retrying", error=last_error)
+            current_state["status"] = "retrying"
+            current_state["error"] = last_error
             state["updated_at"] = now_iso()
             self._write_state(state)
             self.store.append_event(
@@ -438,20 +365,139 @@ class HarnessController:
                 {
                     "type": "task.retrying",
                     "task": task.id,
-                    "attempt": attempt,
+                    "attempt": context.number,
                     "error": last_error,
                 },
             )
         return True
 
+    def _prepare_attempt(
+        self,
+        run_id: str,
+        state: RunState,
+        plan: Plan,
+        task: Task,
+        current_state: TaskState,
+        previous_task: Task | None,
+        last_error: str | None,
+    ) -> _AttemptContext:
+        if current_state["baseline_snapshot"] is None:
+            current_state["baseline_snapshot"] = self.git.snapshot().to_dict()
+        before = self.git.snapshot()
+        attempt = current_state["attempts"] + 1
+        current_state["status"] = "running"
+        current_state["attempts"] = attempt
+        current_state["error"] = None
+        current_state["attempt_snapshot"] = before.to_dict()
+        state["status"] = "running"
+        state["current_task"] = task.id
+        state["updated_at"] = now_iso()
+        self._write_state(state)
+        profile = (
+            self.config.retry
+            if attempt > 1 or current_state["retry_profile"]
+            else self.config.executor
+        )
+        previous_handoff = (
+            self.store.read_json(run_id, f"handoffs/{previous_task.id}.json")
+            if previous_task is not None
+            else None
+        )
+        request = self._task_request(
+            run_id,
+            plan,
+            task,
+            attempt,
+            profile,
+            previous_handoff,
+            last_error,
+        )
+        self.store.append_event(
+            run_id,
+            {
+                "type": "task.started",
+                "task": task.id,
+                "attempt": attempt,
+                "model": profile.model,
+                "reasoning_effort": profile.reasoning_effort,
+            },
+        )
+        return _AttemptContext(attempt, before, request)
+
+    def _run_attempt(
+        self,
+        run_id: str,
+        state: RunState,
+        task: Task,
+        context: _AttemptContext,
+    ) -> tuple[AgentResult, GitSnapshot, str | None]:
+        result, metadata_error = self._run_agent_guarded(
+            run_id,
+            context.request,
+            f"evidence/{task.id}-attempt-{context.number:02d}.jsonl",
+        )
+        after = self.git.snapshot()
+        add_usage(state["usage"], result.usage)
+        self._write_agent_evidence(
+            run_id,
+            f"evidence/{task.id}-attempt-{context.number:02d}-agent.json",
+            context.request,
+            result,
+            changed_files=sorted(self.git.changed_paths(context.before, after)),
+        )
+        safety_error = metadata_error or self.git.safety_error(
+            context.before, after, task.write_paths
+        )
+        return result, after, safety_error
+
+    def _evaluate_attempt(
+        self,
+        run_id: str,
+        state: RunState,
+        task: Task,
+        current_state: TaskState,
+        context: _AttemptContext,
+        result: AgentResult,
+        after: GitSnapshot,
+        safety_error: str | None,
+    ) -> tuple[str, str | None]:
+        if safety_error:
+            self._fail_task(
+                state,
+                current_state,
+                safety_error,
+                context.before,
+                safety_violation=True,
+            )
+            return "terminal", safety_error
+        if not result.succeeded:
+            return "retry", _agent_failure(result)
+        try:
+            report = TaskReport.from_dict(result.payload)
+        except ValidationError as validation_error:
+            return "retry", f"invalid task report: {validation_error}"
+        if report.outcome == "blocked":
+            self._block_task(state, current_state, report, after)
+            return "terminal", report.blocked_reason
+        if report.outcome == "failed":
+            return "retry", report.error or "Codex reported failure"
+        baseline = GitSnapshot.from_dict(current_state["baseline_snapshot"])
+        current_state["status"] = "verifying"
+        current_state["candidate_report"] = report.to_dict()
+        current_state["changed_files"] = sorted(self.git.changed_paths(baseline, after))
+        self._write_state(state)
+        outcome = self._verify_task(run_id, state, task, current_state)
+        error = current_state["error"] or "verification failed"
+        return outcome, error if outcome == "retry" else None
+
     def _verify_task(
         self,
         run_id: str,
-        state: dict[str, object],
+        state: RunState,
         task: Task,
-        task_state: dict[str, object],
+        current_state: TaskState,
     ) -> str:
-        attempt = _attempts(task_state)
+        attempt = current_state["attempts"]
         before = self.git.snapshot()
         run_files = self.store.capture(run_id)
         result = self.verifier.verify(task.verify, self.root)
@@ -472,36 +518,39 @@ class HarnessController:
         if safety_error:
             self._fail_task(
                 state,
-                task_state,
+                current_state,
                 safety_error,
                 before,
                 safety_violation=True,
             )
             return "terminal"
         if not result.ok:
-            task_state.update(status="retrying", error=result.failure_summary())
+            current_state["status"] = "retrying"
+            current_state["error"] = result.failure_summary()
             self._write_state(state)
             if attempt >= self.config.max_attempts:
-                self._fail_task(state, task_state, result.failure_summary(), after)
+                self._fail_task(state, current_state, result.failure_summary(), after)
                 return "terminal"
             return "retry"
-        report = TaskReport.from_dict(task_state["candidate_report"])
-        handoff = _handoff(task, task_state, report, result)
+        report = TaskReport.from_dict(current_state["candidate_report"])
+        handoff = build_handoff(
+            task,
+            current_state,
+            report,
+            result,
+            self.config.max_handoff_bytes,
+        )
         self.store.write_json(run_id, f"handoffs/{task.id}.json", handoff)
-        task_state.update(
-            status="completed",
-            retry_profile=False,
-            summary=report.summary,
-            error=None,
-            candidate_report=None,
-            baseline_snapshot=None,
-            attempt_snapshot=None,
-        )
-        state.update(
-            current_task=None,
-            workspace_snapshot=after.to_dict(),
-            updated_at=now_iso(),
-        )
+        current_state["status"] = "completed"
+        current_state["retry_profile"] = False
+        current_state["summary"] = report.summary
+        current_state["error"] = None
+        current_state["candidate_report"] = None
+        current_state["baseline_snapshot"] = None
+        current_state["attempt_snapshot"] = None
+        state["current_task"] = None
+        state["workspace_snapshot"] = after.to_dict()
+        state["updated_at"] = now_iso()
         self._write_state(state)
         self.store.append_event(
             run_id,
@@ -509,15 +558,11 @@ class HarnessController:
         )
         return "completed"
 
-    def _finalize(
-        self, run_id: str, state: dict[str, object], plan: Plan
-    ) -> dict[str, object]:
-        state.update(
-            status="verifying",
-            current_task=None,
-            failure_stage="final",
-            updated_at=now_iso(),
-        )
+    def _finalize(self, run_id: str, state: RunState, plan: Plan) -> RunState:
+        state["status"] = "verifying"
+        state["current_task"] = None
+        state["failure_stage"] = "final"
+        state["updated_at"] = now_iso()
         self._write_state(state)
         before = self.git.snapshot()
         run_files = self.store.capture(run_id)
@@ -540,28 +585,26 @@ class HarnessController:
             safety_violation = (
                 metadata_changed or before.fingerprint != after.fingerprint
             )
-            state.update(
-                status="failed",
-                failure_stage="final",
-                error=error,
-                safety_violation=safety_violation,
-                workspace_snapshot=(before if safety_violation else after).to_dict(),
-                updated_at=now_iso(),
-            )
+            state["status"] = "failed"
+            state["failure_stage"] = "final"
+            state["error"] = error
+            state["safety_violation"] = safety_violation
+            state["workspace_snapshot"] = (
+                before if safety_violation else after
+            ).to_dict()
+            state["updated_at"] = now_iso()
             self._write_state(state)
             self.store.append_event(
                 run_id, {"type": "run.failed", "stage": "final", "error": error}
             )
             return state
-        state.update(
-            status="completed",
-            current_task=None,
-            failure_stage=None,
-            error=None,
-            workspace_snapshot=after.to_dict(),
-            updated_at=now_iso(),
-            completed_at=now_iso(),
-        )
+        state["status"] = "completed"
+        state["current_task"] = None
+        state["failure_stage"] = None
+        state["error"] = None
+        state["workspace_snapshot"] = after.to_dict()
+        state["updated_at"] = now_iso()
+        state["completed_at"] = now_iso()
         self._write_state(state)
         self.store.append_event(run_id, {"type": "run.completed"})
         return state
@@ -582,7 +625,11 @@ class HarnessController:
                 goal=plan.goal,
                 task=task,
                 previous_handoff=previous_handoff,
-                last_error=last_error,
+                last_error=(
+                    bounded_text(last_error, self.config.max_retry_context_bytes)
+                    if last_error is not None
+                    else None
+                ),
                 network_enabled=network,
             ),
             cwd=self.root,
@@ -665,11 +712,8 @@ class HarnessController:
     def _plan(self, run_id: str) -> Plan:
         return Plan.from_dict(self.store.read_json(run_id, "plan.json"))
 
-    def _write_state(self, state: Mapping[str, object]) -> None:
-        run_id = state.get("run_id")
-        if not isinstance(run_id, str):
-            raise ValidationError("state.run_id must be a string")
-        self.store.write_json(run_id, "state.json", state)
+    def _write_state(self, state: RunState) -> None:
+        self.store.write_json(state["run_id"], "state.json", state)
 
     @staticmethod
     def _assert_plan_hash(state: Mapping[str, object], plan: Plan) -> None:
@@ -678,54 +722,52 @@ class HarnessController:
 
     def _fail_task(
         self,
-        state: dict[str, object],
-        task_state: dict[str, object],
+        state: RunState,
+        current_state: TaskState,
         error: str,
         snapshot: GitSnapshot,
         *,
         safety_violation: bool = False,
     ) -> None:
-        task_state.update(status="failed", error=error)
-        state.update(
-            status="failed",
-            current_task=task_state["id"],
-            failure_stage="task",
-            error=error,
-            safety_violation=safety_violation,
-            workspace_snapshot=snapshot.to_dict(),
-            updated_at=now_iso(),
-        )
+        current_state["status"] = "failed"
+        current_state["error"] = error
+        state["status"] = "failed"
+        state["current_task"] = current_state["id"]
+        state["failure_stage"] = "task"
+        state["error"] = error
+        state["safety_violation"] = safety_violation
+        state["workspace_snapshot"] = snapshot.to_dict()
+        state["updated_at"] = now_iso()
         self._write_state(state)
         self.store.append_event(
             str(state["run_id"]),
-            {"type": "task.failed", "task": task_state["id"], "error": error},
+            {"type": "task.failed", "task": current_state["id"], "error": error},
         )
 
     def _block_task(
         self,
-        state: dict[str, object],
-        task_state: dict[str, object],
+        state: RunState,
+        current_state: TaskState,
         report: TaskReport,
         snapshot: GitSnapshot,
     ) -> None:
-        task_state.update(status="blocked", error=report.blocked_reason)
-        state.update(
-            status="blocked",
-            current_task=task_state["id"],
-            failure_stage="task",
-            error=None,
-            blocked_reason=report.blocked_reason,
-            required_action=report.required_action,
-            safety_violation=False,
-            workspace_snapshot=snapshot.to_dict(),
-            updated_at=now_iso(),
-        )
+        current_state["status"] = "blocked"
+        current_state["error"] = report.blocked_reason
+        state["status"] = "blocked"
+        state["current_task"] = current_state["id"]
+        state["failure_stage"] = "task"
+        state["error"] = None
+        state["blocked_reason"] = report.blocked_reason
+        state["required_action"] = report.required_action
+        state["safety_violation"] = False
+        state["workspace_snapshot"] = snapshot.to_dict()
+        state["updated_at"] = now_iso()
         self._write_state(state)
         self.store.append_event(
             str(state["run_id"]),
             {
                 "type": "task.blocked",
-                "task": task_state["id"],
+                "task": current_state["id"],
                 "reason": report.blocked_reason,
                 "required_action": report.required_action,
             },
@@ -742,99 +784,11 @@ def _run_id(goal: str) -> str:
     return f"run-{timestamp}-{secrets.token_hex(3)}-{slug}"
 
 
-def _new_state(run_id: str, plan: Plan) -> dict[str, object]:
-    now = now_iso()
-    return {
-        "version": 1,
-        "run_id": run_id,
-        "goal": plan.goal,
-        "status": "draft",
-        "plan_sha256": None,
-        "current_task": None,
-        "failure_stage": None,
-        "error": None,
-        "blocked_reason": None,
-        "required_action": None,
-        "safety_violation": False,
-        "workspace_snapshot": None,
-        "usage": {
-            "input_tokens": 0,
-            "cached_input_tokens": 0,
-            "output_tokens": 0,
-            "reasoning_output_tokens": 0,
-        },
-        "tasks": [
-            {
-                "id": task.id,
-                "status": "pending",
-                "attempts": 0,
-                "retry_profile": False,
-                "summary": None,
-                "error": None,
-                "changed_files": [],
-                "candidate_report": None,
-                "baseline_snapshot": None,
-                "attempt_snapshot": None,
-            }
-            for task in plan.tasks
-        ],
-        "created_at": now,
-        "updated_at": now,
-        "completed_at": None,
-    }
-
-
-def _validate_state(state: Mapping[str, object], run_id: str) -> None:
-    if state.get("version") != 1 or state.get("run_id") != run_id:
-        raise ValidationError("invalid run state identity")
-    if state.get("status") not in {
-        "draft",
-        "approved",
-        "running",
-        "verifying",
-        "completed",
-        "failed",
-        "blocked",
-    }:
-        raise ValidationError("invalid run status")
-    tasks = state.get("tasks")
-    if not isinstance(tasks, list) or not tasks:
-        raise ValidationError("state.tasks must not be empty")
-
-
-def _task_state(state: Mapping[str, object], task_id: str) -> dict[str, object]:
-    tasks = state.get("tasks")
-    if not isinstance(tasks, list):
-        raise ValidationError("state.tasks must be an array")
-    for task in tasks:
-        if isinstance(task, dict) and task.get("id") == task_id:
-            return task
-    raise ValidationError(f"state does not contain {task_id}")
-
-
 def _task_by_id(plan: Plan, task_id: str) -> Task:
     for task in plan.tasks:
         if task.id == task_id:
             return task
     raise HarnessError(f"plan does not contain task: {task_id}")
-
-
-def _usage(state: dict[str, object]) -> dict[str, int]:
-    usage = state.get("usage")
-    if not isinstance(usage, dict):
-        raise ValidationError("state.usage must be an object")
-    if not all(
-        isinstance(key, str) and isinstance(value, int) for key, value in usage.items()
-    ):
-        raise ValidationError("state.usage values must be integers")
-    return usage
-
-
-def _attempts(task_state: Mapping[str, object]) -> int:
-    attempts = task_state.get("attempts")
-    if isinstance(attempts, bool) or not isinstance(attempts, int):
-        raise ValidationError("task state attempts must be an integer")
-    return attempts
 
 
 def _agent_failure(result: AgentResult) -> str:
@@ -846,42 +800,6 @@ def _agent_failure(result: AgentResult) -> str:
         malformed_events=result.malformed_events,
         result_truncated=result.result_truncated,
     )
-
-
-def _handoff(
-    task: Task,
-    task_state: Mapping[str, object],
-    report: TaskReport,
-    verification: VerificationResult,
-) -> dict[str, object]:
-    return {
-        "version": 1,
-        "task": task.id,
-        "summary": _bounded(report.summary, 1_000),
-        "changed_files": _changed_files(task_state),
-        "public_contracts": [
-            _bounded(item, 500) for item in report.public_contracts[:10]
-        ],
-        "decisions": [_bounded(item, 500) for item in report.decisions[:10]],
-        "verification": [
-            {"argv": list(command.argv), "exit_code": command.exit_code}
-            for command in verification.commands
-        ],
-        "remaining_risks": [
-            _bounded(item, 500) for item in report.remaining_risks[:10]
-        ],
-    }
-
-
-def _changed_files(task_state: Mapping[str, object]) -> list[str]:
-    value = task_state.get("changed_files")
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ValidationError("task state changed_files must be a string array")
-    return value[:100]
-
-
-def _bounded(value: str, limit: int) -> str:
-    return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
 def _changed_keys(before: Mapping[str, bytes], after: Mapping[str, bytes]) -> set[str]:
