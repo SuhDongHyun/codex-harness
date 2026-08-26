@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["outcome", "summary", "error", "blocked_reason", "required_action", "decisions", "public_contracts", "remaining_risks"],
+  "properties": {
+    "outcome": { "type": "string", "enum": ["completed", "failed", "blocked"] },
+    "summary": { "type": "string" },
+    "error": { "type": ["string", "null"] },
+    "blocked_reason": { "type": ["string", "null"] },
+    "required_action": { "type": ["string", "null"] },
+    "decisions": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "public_contracts": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "remaining_risks": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  }
+}
