@@ -4,8 +4,7 @@ import unittest
 
 from codex_harness.errors import ValidationError
 from codex_harness.models import Plan, TaskReport
-
-from .helpers import completed_report, plan_payload
+from tests.helpers import completed_report, plan_payload
 
 
 class PlanTests(unittest.TestCase):

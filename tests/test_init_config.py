@@ -9,8 +9,7 @@ from pathlib import Path
 from codex_harness.config import HarnessConfig
 from codex_harness.errors import HarnessError
 from codex_harness.init_project import initialize_project
-
-from .helpers import initialize_git_project
+from tests.helpers import initialize_git_project
 
 
 class InitAndConfigTests(unittest.TestCase):

@@ -9,8 +9,7 @@ from codex_harness.controller import HarnessController
 from codex_harness.errors import HarnessError
 from codex_harness.git_guard import GitGuard
 from codex_harness.store import RunStore
-
-from .helpers import (
+from tests.helpers import (
     FakeRunner,
     FakeVerifier,
     blocked_report,

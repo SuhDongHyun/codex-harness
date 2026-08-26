@@ -8,8 +8,7 @@ from pathlib import Path
 from codex_harness.errors import HarnessError, ValidationError
 from codex_harness.git_guard import GitGuard, paths_outside_allowed
 from codex_harness.store import RunStore
-
-from .helpers import initialize_git_project
+from tests.helpers import initialize_git_project
 
 
 class GitAndStoreTests(unittest.TestCase):
