@@ -1,11 +1,14 @@
 # Codex Task Harness
 
 This repository contains a small, reusable Codex execution engine intended to
-be mounted read-only as a Git submodule in another project.
+be mounted read-only at `.agents/skills/harness` in another project. The root
+`SKILL.md` is the user-facing interface; `engine/` is its implementation.
 
 ## Invariants
 
 - Support Python 3.11 or newer with the standard library only at runtime.
+- Expose parent-project usage through `$harness` skill requests, not a required
+  terminal installation or generated wrapper.
 - Treat the directory passed through `--project-root` as the target repository.
 - Never write runtime state inside the engine repository or submodule.
 - Only `HarnessController` may change run or task state.
@@ -25,8 +28,8 @@ be mounted read-only as a Git submodule in another project.
 
 ```bash
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
-PYTHONDONTWRITEBYTECODE=1 python3 -m compileall -q codex_harness scripts/harness.py
-ruff check codex_harness tests scripts/harness.py
-ruff format --check codex_harness tests scripts/harness.py
-uvx --from mypy mypy --strict codex_harness tests
+PYTHONDONTWRITEBYTECODE=1 python3 -m compileall -q engine scripts/harness.py
+ruff check engine tests scripts/harness.py
+ruff format --check engine tests scripts/harness.py
+uvx --from mypy mypy --strict engine tests
 ```
