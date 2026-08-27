@@ -4,8 +4,8 @@ import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from codex_harness.runner import AgentRequest, AgentResult
-from codex_harness.verifier import CommandEvidence, VerificationResult
+from engine.runner import AgentRequest, AgentResult
+from engine.verifier import CommandEvidence, VerificationResult
 
 
 def git(*arguments: str, cwd: Path) -> str:

@@ -4,11 +4,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_harness.config import HarnessConfig
-from codex_harness.controller import HarnessController
-from codex_harness.errors import HarnessError
-from codex_harness.git_guard import GitGuard
-from codex_harness.store import RunStore
+from engine.config import HarnessConfig
+from engine.controller import HarnessController
+from engine.errors import HarnessError
+from engine.git_guard import GitGuard
+from engine.store import RunStore
 from tests.helpers import (
     FakeRunner,
     FakeVerifier,
@@ -290,9 +290,9 @@ class ControllerTests(unittest.TestCase):
 
     def test_approval_rejects_write_scope_overlapping_engine(self) -> None:
         payload = plan_payload()
-        payload["tasks"][0]["write_paths"] = ["tools/**"]  # type: ignore[index]
+        payload["tasks"][0]["write_paths"] = [".agents/**"]  # type: ignore[index]
         runner = FakeRunner([payload])
-        engine = self.root / "tools/codex-task-harness"
+        engine = self.root / ".agents/skills/harness"
         controller = self.controller(runner, engine_root=engine)
         run_id = controller.plan("change app")
 

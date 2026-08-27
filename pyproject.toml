@@ -13,11 +13,8 @@ license-files = ["LICENSE"]
 authors = [{ name = "Suh DongHyun" }]
 dependencies = []
 
-[project.scripts]
-harness = "codex_harness.cli:entrypoint"
-
 [tool.setuptools.package-data]
-codex_harness = ["schemas/*.json"]
+engine = ["schemas/*.json"]
 
 [tool.ruff]
 target-version = "py311"

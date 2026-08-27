@@ -32,7 +32,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init", help="create parent-project integration files")
-    init.add_argument("--submodule-path", default="tools/codex-task-harness")
     init.add_argument("--force", action="store_true")
     plan = commands.add_parser("plan", help="create a read-only draft plan")
     plan.add_argument("goal", nargs="+")
@@ -66,7 +65,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             changed = initialize_project(
                 project_root,
                 ENGINE_ROOT,
-                args.submodule_path,
                 force=args.force,
             )
             _print({"project_root": str(project_root), "changed": changed})
