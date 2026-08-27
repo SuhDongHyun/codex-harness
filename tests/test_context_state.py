@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from codex_harness.context import bounded_text, build_handoff, serialized_size
-from codex_harness.errors import ValidationError
-from codex_harness.models import Plan, TaskReport
-from codex_harness.state import new_state, parse_state
-from codex_harness.verifier import CommandEvidence, VerificationResult
+from engine.context import bounded_text, build_handoff, serialized_size
+from engine.errors import ValidationError
+from engine.models import Plan, TaskReport
+from engine.state import new_state, parse_state
+from engine.verifier import CommandEvidence, VerificationResult
 from tests.helpers import completed_report, plan_payload
 
 

@@ -1,7 +1,7 @@
 # Codex Task Harness
 
-A lightweight, submodule-ready harness that turns one coding goal into ordered
-tasks and executes every task and retry in a fresh Codex session.
+A Codex skill backed by a lightweight controller that turns one coding goal
+into ordered tasks and executes every task and retry in a fresh Codex session.
 
 The controller, rather than the model, owns state and completion. It checks Git
 scope after every agent attempt and independently runs each task's verification
@@ -15,44 +15,44 @@ goal -> plan -> approve -> task-01 (fresh session) -> verify -> handoff
                         -> final verification -> complete
 ```
 
-The engine is designed to live inside another Git repository as a read-only
-submodule. All project-specific configuration and run state live in the parent
-repository, never in this engine checkout.
+The repository is installed directly as the parent project's `harness` skill.
+Its controller engine remains read-only while project-specific configuration
+and run state live in the parent repository.
 
-## Add it to a project
-
-```bash
-git submodule add https://github.com/SuhDongHyun/codex-harness.git tools/codex-task-harness
-python3 tools/codex-task-harness/scripts/harness.py \
-  --project-root "$PWD" init \
-  --submodule-path tools/codex-task-harness
-```
-
-`init` creates the following parent-project integration files without
-overwriting unrelated content:
-
-```text
-.harness/config.toml
-.agents/skills/harness/SKILL.md
-scripts/harness
-.gitignore                 # adds .harness/runs/
-```
-
-Then use the generated wrapper:
+## Install the skill
 
 ```bash
-./scripts/harness plan "Implement the login flow"
-./scripts/harness status <run-id>
-./scripts/harness approve <run-id>
-./scripts/harness run <run-id>
-./scripts/harness resume <run-id>
-./scripts/harness retry-task <run-id> <task-id|final>
+git submodule add \
+  https://github.com/SuhDongHyun/codex-harness.git \
+  .agents/skills/harness
+```
+
+Start a new Codex session in the parent project so it discovers the skill, then
+initialize project-specific state:
+
+```console
+$harness init
+```
+
+`init` creates `.harness/config.toml` and adds `.harness/runs/` to the parent
+project's `.gitignore`. It does not copy the skill or create a terminal wrapper.
+
+## Use it from Codex
+
+```console
+$harness plan Implement the login flow
+$harness status <run-id>
+$harness approve <run-id>
+$harness run <run-id>
+$harness resume <run-id>
+$harness retry-task <run-id> <task-id|final>
 ```
 
 `plan` is read-only. Review `.harness/runs/<run-id>/plan.json` before approval.
 `run` starts only from an approved state. `resume` recovers a controller process
 that stopped while running. `retry-task` explicitly reopens a failed or blocked
-task after the underlying problem has been addressed.
+task after the underlying problem has been addressed; a separate `run` request
+starts the reopened work.
 
 ## Runtime requirements
 
@@ -61,9 +61,26 @@ task after the underlying problem has been addressed.
 - Git
 - an installed and authenticated Codex CLI
 
-No runtime Python packages are required. The harness reuses normal Codex CLI
+No runtime Python packages or terminal command installation are required. The
+skill invokes its bundled `engine` package and reuses normal Codex CLI
 authentication. Nested Codex runs ignore user config but do not require a
 separate `CODEX_HOME` or login.
+
+## Clone a parent project
+
+Clone with the skill submodule included:
+
+```bash
+git clone --recurse-submodules <parent-repository-url>
+```
+
+For an existing clone:
+
+```bash
+git submodule update --init --recursive
+```
+
+Start a new Codex session after the submodule is available.
 
 ## State layout
 
@@ -94,9 +111,9 @@ See [DESIGN.md](DESIGN.md) for authority, recovery, and handoff contracts.
 ## Development checks
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -v
-PYTHONDONTWRITEBYTECODE=1 python3 -m compileall -q codex_harness tests scripts/harness.py
-ruff check codex_harness tests scripts/harness.py
-ruff format --check codex_harness tests scripts/harness.py
-uvx --from mypy mypy --strict codex_harness tests
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -v
+PYTHONDONTWRITEBYTECODE=1 python3 -m compileall -q engine scripts/harness.py
+ruff check engine tests scripts/harness.py
+ruff format --check engine tests scripts/harness.py
+uvx --from mypy mypy --strict engine tests
 ```

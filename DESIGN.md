@@ -38,13 +38,22 @@ risks. Earlier handoffs are not accumulated into later prompts.
 
 ## Parent-project boundary
 
-The engine root is where this package and its schemas live. The project root is
-an explicit CLI argument and must be a Git repository. These roots may be
-nested because the engine is normally mounted as a submodule.
+The repository root is a Codex skill mounted at
+`.agents/skills/harness` in the parent project. The controller engine and its
+schemas live under that read-only skill root. The project root is an explicit
+controller argument and must be the parent Git repository.
 
-The engine never writes to its own root during normal use. `init` writes only to
-the explicitly selected parent project. Run artifacts live under that parent's
+The engine never writes to the skill submodule during normal use. The
+`$harness init` command writes only `.harness/config.toml` and the run-state
+ignore entry to the parent project. Run artifacts live under that parent's
 `.harness/runs` directory.
+
+## Skill interface
+
+`SKILL.md` is the user-facing interface. It routes `$harness init`, `plan`,
+`approve`, `run`, `status`, `resume`, and `retry-task` to the deterministic
+controller entrypoint. The skill does not duplicate controller state changes or
+verification logic. Planning and approval remain separate user requests.
 
 ## Recovery
 

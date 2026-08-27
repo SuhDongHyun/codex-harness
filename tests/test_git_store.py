@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_harness.errors import HarnessError, ValidationError
-from codex_harness.git_guard import GitGuard, paths_outside_allowed
-from codex_harness.store import RunStore
+from engine.errors import HarnessError, ValidationError
+from engine.git_guard import GitGuard, paths_outside_allowed
+from engine.store import RunStore
 from tests.helpers import initialize_git_project
 
 

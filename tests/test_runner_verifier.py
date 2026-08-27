@@ -4,8 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from codex_harness.runner import AgentRequest, CodexRunner
-from codex_harness.verifier import Verifier
+from engine.runner import AgentRequest, CodexRunner
+from engine.verifier import Verifier
 
 
 class RunnerVerifierTests(unittest.TestCase):

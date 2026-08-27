@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 
-from codex_harness.errors import ValidationError
-from codex_harness.models import Plan, TaskReport
+from engine.errors import ValidationError
+from engine.models import Plan, TaskReport
 from tests.helpers import completed_report, plan_payload
 
 
