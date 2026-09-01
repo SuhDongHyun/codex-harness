@@ -32,9 +32,17 @@ calls are never resumed or forked. A task prompt contains only:
 - the immediately preceding verified handoff, if one exists; and
 - the last failure summary for the current task retry.
 
-The repository files remain the source of truth. Handoffs are limited to file
-names, public contracts, decisions, verification summaries, and remaining
-risks. Earlier handoffs are not accumulated into later prompts.
+The planner records the repository-relative instruction and documentation files
+that informed the plan as `context_sources`. The controller, not the planner,
+calculates their SHA-256 digests. Every source must appear in at least one
+task's `read_files`, and approval rejects sources that overlap any task's write
+scope. Approval and execution also reject a source whose contents no longer
+match the planned digest; changed planning context requires a new run.
+
+The repository files remain the source of truth. Context sources are referenced
+by path rather than copied into every prompt. Handoffs are limited to file names,
+public contracts, decisions, verification summaries, and remaining risks.
+Earlier handoffs are not accumulated into later prompts.
 
 ## Parent-project boundary
 

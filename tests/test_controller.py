@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -287,6 +288,77 @@ class ControllerTests(unittest.TestCase):
 
         self.assertRegex(run_id, r"^run-[a-z0-9-]+$")
         self.assertTrue(self.store.run_dir(run_id).exists())
+
+    def test_plan_pins_controller_owned_context_source_hash(self) -> None:
+        docs = self.root / "docs"
+        docs.mkdir()
+        source = docs / "PRD.md"
+        source.write_text("original requirements\n", encoding="utf-8")
+        payload = plan_payload()
+        payload["context_sources"] = ["docs/PRD.md"]
+        payload["tasks"][0]["read_files"].append("docs/PRD.md")  # type: ignore[index]
+        runner = FakeRunner([payload])
+        controller = self.controller(runner)
+
+        run_id = controller.plan("change app")
+
+        saved = self.store.read_json(run_id, "plan.json")
+        sources = saved["context_sources"]
+        self.assertIsInstance(sources, list)
+        self.assertEqual(
+            sources,
+            [
+                {
+                    "path": "docs/PRD.md",
+                    "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+                }
+            ],
+        )
+        self.assertIn("context_sources", runner.requests[0].prompt)
+
+    def test_approval_rejects_context_changed_after_planning(self) -> None:
+        docs = self.root / "docs"
+        docs.mkdir()
+        source = docs / "PRD.md"
+        source.write_text("original requirements\n", encoding="utf-8")
+        payload = plan_payload()
+        payload["context_sources"] = ["docs/PRD.md"]
+        payload["tasks"][0]["read_files"].append("docs/PRD.md")  # type: ignore[index]
+        controller = self.controller(FakeRunner([payload]))
+        run_id = controller.plan("change app")
+        source.write_text("changed requirements\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(HarnessError, "planning context changed"):
+            controller.approve(run_id)
+
+    def test_run_rejects_context_changed_after_approval(self) -> None:
+        docs = self.root / "docs"
+        docs.mkdir()
+        source = docs / "PRD.md"
+        source.write_text("original requirements\n", encoding="utf-8")
+        payload = plan_payload()
+        payload["context_sources"] = ["docs/PRD.md"]
+        payload["tasks"][0]["read_files"].append("docs/PRD.md")  # type: ignore[index]
+        controller = self.controller(FakeRunner([payload]))
+        run_id = self.plan_and_approve(controller)
+        source.write_text("changed requirements\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(HarnessError, "planning context changed"):
+            controller.run(run_id)
+
+    def test_approval_rejects_writable_context_source(self) -> None:
+        docs = self.root / "docs"
+        docs.mkdir()
+        (docs / "PRD.md").write_text("requirements\n", encoding="utf-8")
+        payload = plan_payload()
+        payload["context_sources"] = ["docs/PRD.md"]
+        payload["tasks"][0]["read_files"].append("docs/PRD.md")  # type: ignore[index]
+        payload["tasks"][0]["write_paths"] = ["app.txt", "docs/**"]  # type: ignore[index]
+        controller = self.controller(FakeRunner([payload]))
+        run_id = controller.plan("change app")
+
+        with self.assertRaisesRegex(HarnessError, "overlap task write_paths"):
+            controller.approve(run_id)
 
     def test_approval_rejects_write_scope_overlapping_engine(self) -> None:
         payload = plan_payload()

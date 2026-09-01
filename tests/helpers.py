@@ -31,8 +31,8 @@ def initialize_git_project(root: Path) -> None:
 
 def plan_payload(goal: str = "change app") -> dict[str, object]:
     return {
-        "version": 1,
         "goal": goal,
+        "context_sources": [],
         "tasks": [
             {
                 "id": "task-01",

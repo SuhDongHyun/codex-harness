@@ -32,14 +32,16 @@ an existing harness config.
 
 Pass the exact remaining text as the goal. Read the returned run ID and
 `.harness/runs/<run-id>/plan.json`, then report the ordered task objectives,
-write scopes, task verification, and final verification. Stop after reporting
-the draft. Never infer approval from a planning request.
+planning context sources and pinned hashes, write scopes, task verification,
+and final verification. Stop after reporting the draft. Never infer approval
+from a planning request.
 
 ### `approve <run-id>`
 
 Treat this exact invocation as approval for that run ID. Run `approve`, report
-the approved state, and stop. Do not start execution unless the user separately
-requests `run`.
+the approved state, and stop. Approval must fail when a planning context source
+changed or overlaps a task write scope. Do not start execution unless the user
+separately requests `run`.
 
 ### `run <run-id>`
 

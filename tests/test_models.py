@@ -15,6 +15,17 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(plan.tasks[0].write_paths, ("app.txt",))
         self.assertEqual(plan.sha256(), Plan.from_dict(plan.to_dict()).sha256())
 
+    def test_context_sources_must_be_read_by_a_task(self) -> None:
+        payload = plan_payload()
+        payload["context_sources"] = [{"path": "docs/PRD.md", "sha256": "a" * 64}]
+
+        with self.assertRaisesRegex(ValidationError, "task read_files"):
+            Plan.from_dict(payload)
+
+        payload["tasks"][0]["read_files"].append("docs/PRD.md")  # type: ignore[index]
+        plan = Plan.from_dict(payload)
+        self.assertEqual(plan.context_sources[0].path, "docs/PRD.md")
+
     def test_rejects_protected_write_path(self) -> None:
         payload = plan_payload()
         payload["tasks"][0]["write_paths"] = [".harness/runs/run-x"]  # type: ignore[index]

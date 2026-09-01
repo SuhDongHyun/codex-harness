@@ -49,10 +49,13 @@ $harness retry-task <run-id> <task-id|final>
 ```
 
 `plan` is read-only. Review `.harness/runs/<run-id>/plan.json` before approval.
-`run` starts only from an approved state. `resume` recovers a controller process
-that stopped while running. `retry-task` explicitly reopens a failed or blocked
-task after the underlying problem has been addressed; a separate `run` request
-starts the reopened work.
+The plan records the instruction and documentation files that informed it with
+controller-calculated SHA-256 hashes, and tasks name the applicable sources in
+their `read_files`. Approval rejects changed or writable context sources. `run`
+starts only from an approved state and rechecks those hashes. `resume` recovers
+a controller process that stopped while running. `retry-task` explicitly reopens
+a failed or blocked task after the underlying problem has been addressed; a
+separate `run` request starts the reopened work.
 
 ## Runtime requirements
 
