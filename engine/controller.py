@@ -1,16 +1,17 @@
 from __future__ import annotations
 
+import hashlib
 import re
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .config import HarnessConfig, ModelProfile
 from .context import bounded_text, build_handoff
 from .errors import HarnessError, ValidationError
-from .git_guard import GitGuard, GitSnapshot
+from .git_guard import GitGuard, GitSnapshot, paths_outside_allowed
 from .models import Plan, Task, TaskReport, add_usage
 from .prompts import agent_failure, planning_prompt, task_prompt
 from .runner import AgentRequest, AgentResult, AgentRunner
@@ -86,7 +87,7 @@ class HarnessController:
         if not result.succeeded:
             raise HarnessError(_agent_failure(result))
         try:
-            plan = Plan.from_dict(result.payload)
+            plan = self._materialize_plan(result.payload)
         except ValidationError as error:
             raise HarnessError(f"planner returned an invalid plan: {error}") from error
         if plan.goal != clean_goal:
@@ -112,6 +113,8 @@ class HarnessController:
             if state["status"] != "draft":
                 raise HarnessError("only a draft run can be approved")
             plan = self._plan(run_id)
+            self._assert_context_sources_current(plan)
+            self._assert_context_sources_read_only(plan)
             self._assert_engine_protected(plan)
             if (
                 any(task.network for task in plan.tasks)
@@ -167,6 +170,7 @@ class HarnessController:
             if state["status"] != "approved":
                 raise HarnessError("run requires approved state")
             self._assert_plan_hash(state, plan)
+            self._assert_context_sources_current(plan)
             expected = GitSnapshot.from_dict(state["workspace_snapshot"])
             current = self.git.snapshot()
             if expected.fingerprint != current.fingerprint:
@@ -184,6 +188,7 @@ class HarnessController:
             if state["status"] not in {"running", "verifying"}:
                 raise HarnessError("resume requires an interrupted running run")
             self._assert_plan_hash(state, plan)
+            self._assert_context_sources_current(plan)
             current_task_id = state.get("current_task")
             if isinstance(current_task_id, str):
                 task = _task_by_id(plan, current_task_id)
@@ -224,6 +229,7 @@ class HarnessController:
             if state["status"] not in {"failed", "blocked"}:
                 raise HarnessError("retry-task requires a failed or blocked run")
             self._assert_plan_hash(state, plan)
+            self._assert_context_sources_current(plan)
             current = self.git.snapshot()
             before = GitSnapshot.from_dict(state["workspace_snapshot"])
             if target == "final":
@@ -711,6 +717,78 @@ class HarnessController:
 
     def _plan(self, run_id: str) -> Plan:
         return Plan.from_dict(self.store.read_json(run_id, "plan.json"))
+
+    def _materialize_plan(self, payload: object) -> Plan:
+        if not isinstance(payload, Mapping):
+            raise ValidationError("plan must be an object")
+        raw = dict(payload)
+        sources = raw.get("context_sources")
+        if not isinstance(sources, list) or not all(
+            isinstance(path, str) for path in sources
+        ):
+            raise ValidationError(
+                "planner context_sources must be an array of repository paths"
+            )
+        raw["context_sources"] = [
+            {"path": path, "sha256": self._context_source_sha256(path)}
+            for path in sources
+        ]
+        return Plan.from_dict(raw)
+
+    def _context_source_sha256(self, relative: str) -> str:
+        pure = PurePosixPath(relative)
+        if (
+            not relative
+            or pure.is_absolute()
+            or ".." in pure.parts
+            or "\\" in relative
+            or any(character in relative for character in "*?[{")
+        ):
+            raise ValidationError(f"unsafe context source path: {relative!r}")
+        candidate = self.root.joinpath(*pure.parts)
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(self.root)
+        except (OSError, ValueError) as error:
+            raise ValidationError(
+                f"context source is missing or outside the project: {relative}"
+            ) from error
+        if not resolved.is_file():
+            raise ValidationError(f"context source is not a file: {relative}")
+        digest = hashlib.sha256()
+        try:
+            with resolved.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except OSError as error:
+            raise ValidationError(f"cannot read context source: {relative}") from error
+        return digest.hexdigest()
+
+    def _assert_context_sources_current(self, plan: Plan) -> None:
+        for source in plan.context_sources:
+            try:
+                current = self._context_source_sha256(source.path)
+            except ValidationError as error:
+                raise HarnessError(
+                    "planning context changed; create a new run: " + source.path
+                ) from error
+            if current != source.sha256:
+                raise HarnessError(
+                    "planning context changed; create a new run: " + source.path
+                )
+
+    @staticmethod
+    def _assert_context_sources_read_only(plan: Plan) -> None:
+        write_paths = tuple(path for task in plan.tasks for path in task.write_paths)
+        writable = [
+            source.path
+            for source in plan.context_sources
+            if not paths_outside_allowed((source.path,), write_paths)
+        ]
+        if writable:
+            raise HarnessError(
+                "context sources overlap task write_paths: " + ", ".join(writable)
+            )
 
     def _write_state(self, state: RunState) -> None:
         self.store.write_json(state["run_id"], "state.json", state)

@@ -13,6 +13,28 @@ TASK_ID = re.compile(r"task-(\d{2})$")
 SLUG = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*$")
 SHELL_OPERATORS = frozenset({"|", "||", "&&", ";", ">", ">>", "<", "<<"})
 PROTECTED_PREFIXES = (".git", ".harness/runs")
+SHA256 = re.compile(r"[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True)
+class ContextSource:
+    path: str
+    sha256: str
+
+    @classmethod
+    def from_dict(cls, value: object) -> ContextSource:
+        raw = _mapping(value, "context source")
+        _exact_keys(raw, {"path", "sha256"}, "context source")
+        paths = _paths([raw["path"]], "context source.path")
+        sha256 = _string(raw["sha256"], "context source.sha256")
+        if not SHA256.fullmatch(sha256):
+            raise ValidationError(
+                "context source.sha256 must be a lowercase SHA-256 digest"
+            )
+        return cls(path=paths[0], sha256=sha256)
+
+    def to_dict(self) -> dict[str, str]:
+        return {"path": self.path, "sha256": self.sha256}
 
 
 @dataclass(frozen=True)
@@ -77,17 +99,28 @@ class Task:
 
 @dataclass(frozen=True)
 class Plan:
-    version: int
     goal: str
+    context_sources: tuple[ContextSource, ...]
     tasks: tuple[Task, ...]
     final_verify: tuple[tuple[str, ...], ...]
 
     @classmethod
     def from_dict(cls, value: object) -> Plan:
         raw = _mapping(value, "plan")
-        _exact_keys(raw, {"version", "goal", "tasks", "final_verify"}, "plan")
-        if raw["version"] != 1:
-            raise ValidationError("plan.version must be 1")
+        _exact_keys(
+            raw,
+            {"goal", "context_sources", "tasks", "final_verify"},
+            "plan",
+        )
+        sources_raw = raw["context_sources"]
+        if not isinstance(sources_raw, list) or len(sources_raw) > 100:
+            raise ValidationError(
+                "plan.context_sources must be an array with at most 100 items"
+            )
+        context_sources = tuple(ContextSource.from_dict(item) for item in sources_raw)
+        source_paths = [source.path for source in context_sources]
+        if len(source_paths) != len(set(source_paths)):
+            raise ValidationError("plan.context_sources paths must be unique")
         tasks_raw = raw["tasks"]
         if not isinstance(tasks_raw, list) or not 1 <= len(tasks_raw) <= 50:
             raise ValidationError("plan.tasks must contain between 1 and 50 tasks")
@@ -95,20 +128,29 @@ class Plan:
         for index, task in enumerate(tasks, start=1):
             if task.id != f"task-{index:02d}":
                 raise ValidationError("task IDs must be sequential from task-01")
+        read_files = {path for task in tasks for path in task.read_files}
+        unused_sources = [
+            source.path for source in context_sources if source.path not in read_files
+        ]
+        if unused_sources:
+            raise ValidationError(
+                "context sources must appear in task read_files: "
+                + ", ".join(unused_sources)
+            )
         final_verify = _commands(raw["final_verify"], "plan.final_verify")
         if not final_verify:
             raise ValidationError("plan.final_verify must not be empty")
         return cls(
-            version=1,
             goal=_string(raw["goal"], "plan.goal"),
+            context_sources=context_sources,
             tasks=tasks,
             final_verify=final_verify,
         )
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "version": self.version,
             "goal": self.goal,
+            "context_sources": [source.to_dict() for source in self.context_sources],
             "tasks": [task.to_dict() for task in self.tasks],
             "final_verify": [list(command) for command in self.final_verify],
         }
