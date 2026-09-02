@@ -1,13 +1,35 @@
 from __future__ import annotations
 
+import json
 import unittest
+from pathlib import Path
 
 from engine.errors import ValidationError
 from engine.models import Plan, TaskReport
 from tests.helpers import completed_report, plan_payload
 
 
+def _nested_keys(value: object) -> set[str]:
+    if isinstance(value, dict):
+        return set(value) | {
+            key for child in value.values() for key in _nested_keys(child)
+        }
+    if isinstance(value, list):
+        return {key for child in value for key in _nested_keys(child)}
+    return set()
+
+
 class PlanTests(unittest.TestCase):
+    def test_output_schemas_use_only_codex_supported_constraints(self) -> None:
+        schemas = Path(__file__).parents[1] / "engine" / "schemas"
+        forbidden = {"$schema", "minLength", "uniqueItems"}
+
+        for path in schemas.glob("*.schema.json"):
+            with self.subTest(schema=path.name):
+                document = json.loads(path.read_text(encoding="utf-8"))
+                keys = _nested_keys(document)
+                self.assertTrue(forbidden.isdisjoint(keys), forbidden & keys)
+
     def test_accepts_strict_sequential_plan(self) -> None:
         plan = Plan.from_dict(plan_payload())
 

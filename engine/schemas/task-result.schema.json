@@ -1,5 +1,4 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
   "required": ["outcome", "summary", "error", "blocked_reason", "required_action", "decisions", "public_contracts", "remaining_risks"],
@@ -12,17 +11,17 @@
     "decisions": {
       "type": "array",
       "maxItems": 20,
-      "items": { "type": "string", "minLength": 1 }
+      "items": { "type": "string" }
     },
     "public_contracts": {
       "type": "array",
       "maxItems": 20,
-      "items": { "type": "string", "minLength": 1 }
+      "items": { "type": "string" }
     },
     "remaining_risks": {
       "type": "array",
       "maxItems": 20,
-      "items": { "type": "string", "minLength": 1 }
+      "items": { "type": "string" }
     }
   }
 }
