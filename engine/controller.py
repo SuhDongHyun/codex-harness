@@ -59,53 +59,86 @@ class HarnessController:
         self.git.assert_repository()
         run_id = _run_id(clean_goal)
         self.store.create(run_id, clean_goal)
-        before_git = self.git.snapshot()
-        before_files = self.store.capture(run_id)
-        event_log = self.store.path(run_id, "evidence/plan-events.jsonl")
-        request = AgentRequest(
-            prompt=planning_prompt(clean_goal),
-            cwd=self.root,
-            sandbox="read-only",
-            schema=self.plan_schema,
-            event_log=event_log,
-            model=self.config.planner.model,
-            reasoning_effort=self.config.planner.reasoning_effort,
-            timeout_seconds=self.config.agent_timeout_seconds,
-            max_event_bytes=self.config.max_event_bytes,
-            max_result_bytes=self.config.max_result_bytes,
+        last_error: str | None = None
+        usage: dict[str, int] = {}
+        for attempt in range(1, self.config.max_attempts + 1):
+            before_git = self.git.snapshot()
+            before_files = self.store.capture(run_id)
+            event_name = (
+                "evidence/plan-events.jsonl"
+                if attempt == 1
+                else f"evidence/plan-attempt-{attempt:02d}-events.jsonl"
+            )
+            agent_name = (
+                "evidence/plan-agent.json"
+                if attempt == 1
+                else f"evidence/plan-attempt-{attempt:02d}-agent.json"
+            )
+            profile = self.config.planner if attempt == 1 else self.config.retry
+            request = AgentRequest(
+                prompt=planning_prompt(clean_goal, last_error),
+                cwd=self.root,
+                sandbox="read-only",
+                schema=self.plan_schema,
+                event_log=self.store.path(run_id, event_name),
+                model=profile.model,
+                reasoning_effort=profile.reasoning_effort,
+                timeout_seconds=self.config.agent_timeout_seconds,
+                max_event_bytes=self.config.max_event_bytes,
+                max_result_bytes=self.config.max_result_bytes,
+            )
+            result = self.runner.run(request)
+            add_usage(usage, result.usage)
+            after_git = self.git.snapshot()
+            metadata_error = self._metadata_error(run_id, before_files, event_name)
+            self._write_agent_evidence(run_id, agent_name, request, result)
+            if before_git.fingerprint != after_git.fingerprint:
+                raise HarnessError("planner changed the project Git working tree")
+            if metadata_error:
+                raise HarnessError(metadata_error)
+            plan: Plan | None = None
+            if result.succeeded:
+                try:
+                    plan = self._materialize_plan(result.payload)
+                    self._assert_plan_approvable(plan, clean_goal)
+                except (HarnessError, ValidationError) as error:
+                    plan = None
+                    last_error = f"planner returned an invalid plan: {error}"
+            else:
+                last_error = _agent_failure(result)
+            if plan is not None:
+                self.store.write_json(run_id, "plan.json", plan.to_dict())
+                state = new_state(run_id, plan)
+                add_usage(state["usage"], usage)
+                self._write_state(state)
+                self.store.append_event(
+                    run_id,
+                    {
+                        "type": "plan.created",
+                        "attempt": attempt,
+                        "model": request.model,
+                        "reasoning_effort": request.reasoning_effort,
+                        "usage": usage,
+                    },
+                )
+                return run_id
+            if attempt < self.config.max_attempts:
+                if last_error is None:
+                    raise AssertionError("rejected plan requires failure evidence")
+                last_error = bounded_text(
+                    last_error, self.config.max_retry_context_bytes
+                )
+                self.store.append_event(
+                    run_id,
+                    {
+                        "type": "plan.retrying",
+                        "attempt": attempt,
+                        "error": last_error,
+                    },
+                )
+        raise HarnessError(
+            f"planner failed after {self.config.max_attempts} attempts: {last_error}"
         )
-        result = self.runner.run(request)
-        after_git = self.git.snapshot()
-        metadata_error = self._metadata_error(
-            run_id, before_files, "evidence/plan-events.jsonl"
-        )
-        self._write_agent_evidence(run_id, "evidence/plan-agent.json", request, result)
-        if before_git.fingerprint != after_git.fingerprint:
-            raise HarnessError("planner changed the project Git working tree")
-        if metadata_error:
-            raise HarnessError(metadata_error)
-        if not result.succeeded:
-            raise HarnessError(_agent_failure(result))
-        try:
-            plan = self._materialize_plan(result.payload)
-        except ValidationError as error:
-            raise HarnessError(f"planner returned an invalid plan: {error}") from error
-        if plan.goal != clean_goal:
-            raise HarnessError("planner changed the requested goal")
-        self.store.write_json(run_id, "plan.json", plan.to_dict())
-        state = new_state(run_id, plan)
-        add_usage(state["usage"], result.usage)
-        self._write_state(state)
-        self.store.append_event(
-            run_id,
-            {
-                "type": "plan.created",
-                "model": request.model,
-                "reasoning_effort": request.reasoning_effort,
-                "usage": result.usage,
-            },
-        )
-        return run_id
 
     def approve(self, run_id: str) -> RunState:
         with self.store.lock(run_id):
@@ -114,16 +147,7 @@ class HarnessController:
                 raise HarnessError("only a draft run can be approved")
             plan = self._plan(run_id)
             self._assert_context_sources_current(plan)
-            self._assert_context_sources_read_only(plan)
-            self._assert_engine_protected(plan)
-            if (
-                any(task.network for task in plan.tasks)
-                and not self.config.executor_network
-            ):
-                requested = ", ".join(task.id for task in plan.tasks if task.network)
-                raise HarnessError(
-                    f"tasks request network ({requested}) but executor_network is false"
-                )
+            self._assert_plan_approvable(plan, state["goal"])
             snapshot = self.git.snapshot()
             state["status"] = "approved"
             state["plan_sha256"] = plan.sha256()
@@ -139,6 +163,20 @@ class HarnessController:
                 },
             )
             return state
+
+    def _assert_plan_approvable(self, plan: Plan, goal: object) -> None:
+        if not isinstance(goal, str) or plan.goal != goal:
+            raise HarnessError("planner changed the requested goal")
+        self._assert_context_sources_read_only(plan)
+        self._assert_engine_protected(plan)
+        if (
+            any(task.network for task in plan.tasks)
+            and not self.config.executor_network
+        ):
+            requested = ", ".join(task.id for task in plan.tasks if task.network)
+            raise HarnessError(
+                f"tasks request network ({requested}) but executor_network is false"
+            )
 
     def _assert_engine_protected(self, plan: Plan) -> None:
         try:

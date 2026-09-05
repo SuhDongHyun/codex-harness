@@ -4,7 +4,8 @@
 
 - **Run**: one user goal and its complete execution history.
 - **Task**: one ordered, independently verifiable unit of work.
-- **Attempt**: one fresh Codex process for a task. Retries are new attempts.
+- **Attempt**: one fresh Codex process for planning or a task. Retries are new
+  attempts.
 - **Handoff**: bounded, verified context passed from one completed task to the
   immediately following task.
 - **Evidence**: agent telemetry, Git scope observations, and controller-run
@@ -24,8 +25,10 @@ cannot complete a task. A task completes only when:
 
 ## Context isolation
 
-Every planner, task, and retry call launches `codex exec --ephemeral`. Executor
-calls are never resumed or forked. A task prompt contains only:
+Every planner, task, and retry call launches `codex exec --ephemeral`. Calls are
+never resumed or forked. A rejected planner result is retried in a fresh process
+with only bounded controller rejection evidence; Git or controller-metadata
+mutation remains an immediate safety failure. A task prompt contains only:
 
 - the run goal;
 - the current task contract;

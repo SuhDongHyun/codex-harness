@@ -5,8 +5,8 @@ import json
 from .models import Task
 
 
-def planning_prompt(goal: str) -> str:
-    return (
+def planning_prompt(goal: str, last_error: str | None = None) -> str:
+    prompt = (
         "Create a complete, minimal sequential implementation plan for the exact "
         "goal below. Minimal means few tasks and a narrow change surface, never "
         "reduced user-visible behavior or weaker proof of completion. Turn "
@@ -39,6 +39,14 @@ def planning_prompt(goal: str) -> str:
         "review-only, commit, or push tasks. The goal field must equal this exact "
         "JSON string: "
         f"{json.dumps(goal, ensure_ascii=False)}.\n\nGoal:\n{goal}"
+    )
+    if last_error is None:
+        return prompt
+    return (
+        prompt
+        + "\n\nThe previous fresh planning attempt was rejected by the controller. "
+        "Return a corrected complete plan; do not defend or repeat the rejected "
+        "plan. Controller rejection evidence:\n" + last_error
     )
 
 
