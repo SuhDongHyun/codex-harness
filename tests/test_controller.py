@@ -4,6 +4,7 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 
 from engine.config import HarnessConfig
 from engine.controller import HarnessController
@@ -40,6 +41,7 @@ class ControllerTests(unittest.TestCase):
         max_retry_context_bytes: int = 8_192,
         max_handoff_bytes: int = 16_384,
         engine_root: Path | None = None,
+        available_commands: frozenset[str] = frozenset(),
     ) -> HarnessController:
         return HarnessController(
             project_root=self.root,
@@ -54,6 +56,7 @@ class ControllerTests(unittest.TestCase):
             verifier=verifier or FakeVerifier(),
             git_guard=GitGuard(self.root),
             engine_root=engine_root,
+            available_commands=available_commands,
         )
 
     def plan_and_approve(
@@ -319,6 +322,42 @@ class ControllerTests(unittest.TestCase):
             controller.plan("change app")
 
         self.assertEqual(len(runner.requests), 2)
+
+    def test_planner_retries_when_available_python_quality_gate_is_missing(
+        self,
+    ) -> None:
+        corrected = plan_payload()
+        tasks = cast(list[object], corrected["tasks"])
+        task = cast(dict[str, object], tasks[0])
+        task["write_paths"] = ["app.py"]
+        verify = cast(list[object], task["verify"])
+        verify.extend(
+            [
+                ["ruff", "check", "app.py"],
+                ["ruff", "format", "--check", "app.py"],
+            ]
+        )
+        final_verify = cast(list[object], corrected["final_verify"])
+        final_verify.extend(
+            [
+                ["ruff", "check", "app.py"],
+                ["ruff", "format", "--check", "app.py"],
+            ]
+        )
+        missing = plan_payload()
+        missing["tasks"][0]["write_paths"] = ["app.py"]  # type: ignore[index]
+        runner = FakeRunner([missing, corrected])
+        controller = self.controller(
+            runner,
+            max_attempts=2,
+            available_commands=frozenset({"ruff"}),
+        )
+
+        run_id = controller.plan("change app")
+
+        self.assertEqual(controller.status(run_id)["status"], "draft")
+        self.assertEqual(len(runner.requests), 2)
+        self.assertIn("missing available quality gate", runner.requests[1].prompt)
 
     def test_plan_pins_controller_owned_context_source_hash(self) -> None:
         docs = self.root / "docs"

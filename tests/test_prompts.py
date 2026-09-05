@@ -21,6 +21,8 @@ class PlanningPromptTests(unittest.TestCase):
             with self.subTest(gate=gate):
                 self.assertIn(gate, prompt)
         self.assertIn("already available in the execution environment", prompt)
+        self.assertIn("requires `ruff check`", prompt)
+        self.assertIn("mypy or pyright", prompt)
 
 
 if __name__ == "__main__":

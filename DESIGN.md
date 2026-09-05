@@ -29,6 +29,11 @@ call loopback services without gaining public-network access. A Python unittest
 or pytest command that reports skipped tests is not accepted as completion
 evidence even when the process exits successfully.
 
+Before a plan can become a draft, the controller compares Python write scopes
+with quality tools available on PATH. Installed Ruff and mypy/pyright tools must
+appear in both the responsible task verification and final verification; a
+missing gate becomes bounded rejection evidence for a fresh planner attempt.
+
 ## Context isolation
 
 Every planner, task, and retry call launches `codex exec --ephemeral`. Calls are

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 import secrets
+import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -38,6 +39,7 @@ class HarnessController:
         verifier: VerificationRunner,
         git_guard: GitGuard,
         engine_root: Path | None = None,
+        available_commands: frozenset[str] | None = None,
     ):
         self.root = project_root.resolve()
         self.config = config
@@ -48,6 +50,15 @@ class HarnessController:
         self.engine_root = (
             engine_root or Path(__file__).resolve().parent.parent
         ).resolve()
+        self.available_commands = (
+            available_commands
+            if available_commands is not None
+            else frozenset(
+                command
+                for command in ("mypy", "pyright", "ruff")
+                if shutil.which(command) is not None
+            )
+        )
         schema_root = Path(__file__).resolve().parent / "schemas"
         self.plan_schema = schema_root / "plan.schema.json"
         self.task_schema = schema_root / "task-result.schema.json"
@@ -169,6 +180,7 @@ class HarnessController:
             raise HarnessError("planner changed the requested goal")
         self._assert_context_sources_read_only(plan)
         self._assert_engine_protected(plan)
+        self._assert_available_quality_gates(plan)
         if (
             any(task.network for task in plan.tasks)
             and not self.config.executor_network
@@ -177,6 +189,48 @@ class HarnessController:
             raise HarnessError(
                 f"tasks request network ({requested}) but executor_network is false"
             )
+
+    def _assert_available_quality_gates(self, plan: Plan) -> None:
+        python_tasks = [
+            task
+            for task in plan.tasks
+            if any(path.endswith(".py") for path in task.write_paths)
+        ]
+        if not python_tasks:
+            return
+        required: list[tuple[str, tuple[str, ...]]] = []
+        if "ruff" in self.available_commands:
+            required.extend(
+                [
+                    ("ruff check", ("ruff", "check")),
+                    ("ruff format --check", ("ruff", "format", "--check")),
+                ]
+            )
+        type_checker = next(
+            (
+                command
+                for command in ("mypy", "pyright")
+                if command in self.available_commands
+            ),
+            None,
+        )
+        if type_checker is not None:
+            required.append((type_checker, (type_checker,)))
+        for task in python_tasks:
+            self._assert_commands_include(
+                task.verify, required, f"{task.id} verification"
+            )
+        self._assert_commands_include(plan.final_verify, required, "final verification")
+
+    @staticmethod
+    def _assert_commands_include(
+        commands: tuple[tuple[str, ...], ...],
+        required: list[tuple[str, tuple[str, ...]]],
+        label: str,
+    ) -> None:
+        for name, prefix in required:
+            if not any(command[: len(prefix)] == prefix for command in commands):
+                raise HarnessError(f"{label} missing available quality gate: {name}")
 
     def _assert_engine_protected(self, plan: Plan) -> None:
         try:
