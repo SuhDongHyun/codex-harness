@@ -10,7 +10,7 @@ commands before writing a bounded handoff for the next task.
 Verification is workspace-confined and has loopback-only network access for
 local service tests. Reported unittest or pytest skips fail verification rather
 than silently weakening completion evidence. For Python write scopes, available
-Ruff and mypy/pyright executables are mandatory task and final plan gates.
+Ruff and strict mypy/pyright executables are mandatory task and final plan gates.
 
 ## Core workflow
 

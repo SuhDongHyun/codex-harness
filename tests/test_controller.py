@@ -359,6 +359,34 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(len(runner.requests), 2)
         self.assertIn("missing available quality gate", runner.requests[1].prompt)
 
+    def test_planner_requires_strict_mypy_when_available(self) -> None:
+        corrected = plan_payload()
+        tasks = cast(list[object], corrected["tasks"])
+        task = cast(dict[str, object], tasks[0])
+        task["write_paths"] = ["app.py"]
+        cast(list[object], task["verify"]).append(["mypy", "--strict", "app.py"])
+        cast(list[object], corrected["final_verify"]).append(
+            ["mypy", "--strict", "app.py"]
+        )
+        non_strict = plan_payload()
+        non_strict_tasks = cast(list[object], non_strict["tasks"])
+        non_strict_task = cast(dict[str, object], non_strict_tasks[0])
+        non_strict_task["write_paths"] = ["app.py"]
+        cast(list[object], non_strict_task["verify"]).append(["mypy", "app.py"])
+        cast(list[object], non_strict["final_verify"]).append(["mypy", "app.py"])
+        runner = FakeRunner([non_strict, corrected])
+        controller = self.controller(
+            runner,
+            max_attempts=2,
+            available_commands=frozenset({"mypy"}),
+        )
+
+        run_id = controller.plan("change app")
+
+        self.assertEqual(controller.status(run_id)["status"], "draft")
+        self.assertEqual(len(runner.requests), 2)
+        self.assertIn("mypy --strict", runner.requests[1].prompt)
+
     def test_plan_pins_controller_owned_context_source_hash(self) -> None:
         docs = self.root / "docs"
         docs.mkdir()

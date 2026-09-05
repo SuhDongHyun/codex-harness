@@ -214,7 +214,9 @@ class HarnessController:
             ),
             None,
         )
-        if type_checker is not None:
+        if type_checker == "mypy":
+            required.append(("mypy --strict", ("mypy", "--strict")))
+        elif type_checker is not None:
             required.append((type_checker, (type_checker,)))
         for task in python_tasks:
             self._assert_commands_include(
