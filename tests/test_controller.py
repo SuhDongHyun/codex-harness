@@ -4,6 +4,7 @@ import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+from typing import cast
 
 from engine.config import HarnessConfig
 from engine.controller import HarnessController
@@ -40,6 +41,7 @@ class ControllerTests(unittest.TestCase):
         max_retry_context_bytes: int = 8_192,
         max_handoff_bytes: int = 16_384,
         engine_root: Path | None = None,
+        available_commands: frozenset[str] = frozenset(),
     ) -> HarnessController:
         return HarnessController(
             project_root=self.root,
@@ -54,6 +56,7 @@ class ControllerTests(unittest.TestCase):
             verifier=verifier or FakeVerifier(),
             git_guard=GitGuard(self.root),
             engine_root=engine_root,
+            available_commands=available_commands,
         )
 
     def plan_and_approve(
@@ -289,6 +292,101 @@ class ControllerTests(unittest.TestCase):
         self.assertRegex(run_id, r"^run-[a-z0-9-]+$")
         self.assertTrue(self.store.run_dir(run_id).exists())
 
+    def test_planner_retries_an_unapprovable_plan_in_a_fresh_session(self) -> None:
+        invalid = plan_payload()
+        invalid["context_sources"] = ["app.txt"]
+        runner = FakeRunner([invalid, plan_payload()])
+        controller = self.controller(runner, max_attempts=2)
+
+        run_id = controller.plan("change app")
+        state = controller.status(run_id)
+
+        self.assertEqual(state["status"], "draft")
+        self.assertEqual(state["usage"]["input_tokens"], 20)
+        self.assertEqual(len(runner.requests), 2)
+        self.assertEqual(runner.requests[0].reasoning_effort, "medium")
+        self.assertEqual(runner.requests[1].reasoning_effort, "high")
+        self.assertIn("context sources overlap", runner.requests[1].prompt)
+        self.assertNotEqual(runner.requests[0].event_log, runner.requests[1].event_log)
+        self.assertTrue(
+            self.store.path(run_id, "evidence/plan-attempt-02-agent.json").exists()
+        )
+
+    def test_planner_stops_after_invalid_attempt_limit(self) -> None:
+        invalid = plan_payload()
+        invalid["context_sources"] = ["app.txt"]
+        runner = FakeRunner([invalid, invalid])
+        controller = self.controller(runner, max_attempts=2)
+
+        with self.assertRaisesRegex(HarnessError, "failed after 2 attempts"):
+            controller.plan("change app")
+
+        self.assertEqual(len(runner.requests), 2)
+
+    def test_planner_retries_when_available_python_quality_gate_is_missing(
+        self,
+    ) -> None:
+        corrected = plan_payload()
+        tasks = cast(list[object], corrected["tasks"])
+        task = cast(dict[str, object], tasks[0])
+        task["write_paths"] = ["app.py"]
+        verify = cast(list[object], task["verify"])
+        verify.extend(
+            [
+                ["ruff", "check", "app.py"],
+                ["ruff", "format", "--check", "app.py"],
+            ]
+        )
+        final_verify = cast(list[object], corrected["final_verify"])
+        final_verify.extend(
+            [
+                ["ruff", "check", "app.py"],
+                ["ruff", "format", "--check", "app.py"],
+            ]
+        )
+        missing = plan_payload()
+        missing["tasks"][0]["write_paths"] = ["app.py"]  # type: ignore[index]
+        runner = FakeRunner([missing, corrected])
+        controller = self.controller(
+            runner,
+            max_attempts=2,
+            available_commands=frozenset({"ruff"}),
+        )
+
+        run_id = controller.plan("change app")
+
+        self.assertEqual(controller.status(run_id)["status"], "draft")
+        self.assertEqual(len(runner.requests), 2)
+        self.assertIn("missing available quality gate", runner.requests[1].prompt)
+
+    def test_planner_requires_strict_mypy_when_available(self) -> None:
+        corrected = plan_payload()
+        tasks = cast(list[object], corrected["tasks"])
+        task = cast(dict[str, object], tasks[0])
+        task["write_paths"] = ["app.py"]
+        cast(list[object], task["verify"]).append(["mypy", "--strict", "app.py"])
+        cast(list[object], corrected["final_verify"]).append(
+            ["mypy", "--strict", "app.py"]
+        )
+        non_strict = plan_payload()
+        non_strict_tasks = cast(list[object], non_strict["tasks"])
+        non_strict_task = cast(dict[str, object], non_strict_tasks[0])
+        non_strict_task["write_paths"] = ["app.py"]
+        cast(list[object], non_strict_task["verify"]).append(["mypy", "app.py"])
+        cast(list[object], non_strict["final_verify"]).append(["mypy", "app.py"])
+        runner = FakeRunner([non_strict, corrected])
+        controller = self.controller(
+            runner,
+            max_attempts=2,
+            available_commands=frozenset({"mypy"}),
+        )
+
+        run_id = controller.plan("change app")
+
+        self.assertEqual(controller.status(run_id)["status"], "draft")
+        self.assertEqual(len(runner.requests), 2)
+        self.assertIn("mypy --strict", runner.requests[1].prompt)
+
     def test_plan_pins_controller_owned_context_source_hash(self) -> None:
         docs = self.root / "docs"
         docs.mkdir()
@@ -349,24 +447,32 @@ class ControllerTests(unittest.TestCase):
     def test_approval_rejects_writable_context_source(self) -> None:
         docs = self.root / "docs"
         docs.mkdir()
-        (docs / "PRD.md").write_text("requirements\n", encoding="utf-8")
-        payload = plan_payload()
-        payload["context_sources"] = ["docs/PRD.md"]
-        payload["tasks"][0]["read_files"].append("docs/PRD.md")  # type: ignore[index]
-        payload["tasks"][0]["write_paths"] = ["app.txt", "docs/**"]  # type: ignore[index]
-        controller = self.controller(FakeRunner([payload]))
+        source = docs / "PRD.md"
+        source.write_text("requirements\n", encoding="utf-8")
+        controller = self.controller(FakeRunner([plan_payload()]))
         run_id = controller.plan("change app")
+        saved = self.store.read_json(run_id, "plan.json")
+        saved["context_sources"] = [
+            {
+                "path": "docs/PRD.md",
+                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+            }
+        ]
+        saved["tasks"][0]["read_files"].append("docs/PRD.md")  # type: ignore[index]
+        saved["tasks"][0]["write_paths"] = ["app.txt", "docs/**"]  # type: ignore[index]
+        self.store.write_json(run_id, "plan.json", saved)
 
         with self.assertRaisesRegex(HarnessError, "overlap task write_paths"):
             controller.approve(run_id)
 
     def test_approval_rejects_write_scope_overlapping_engine(self) -> None:
-        payload = plan_payload()
-        payload["tasks"][0]["write_paths"] = [".agents/**"]  # type: ignore[index]
-        runner = FakeRunner([payload])
+        runner = FakeRunner([plan_payload()])
         engine = self.root / ".agents/skills/harness"
         controller = self.controller(runner, engine_root=engine)
         run_id = controller.plan("change app")
+        saved = self.store.read_json(run_id, "plan.json")
+        saved["tasks"][0]["write_paths"] = [".agents/**"]  # type: ignore[index]
+        self.store.write_json(run_id, "plan.json", saved)
 
         with self.assertRaisesRegex(HarnessError, "read-only harness engine"):
             controller.approve(run_id)

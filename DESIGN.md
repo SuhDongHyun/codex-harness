@@ -4,7 +4,8 @@
 
 - **Run**: one user goal and its complete execution history.
 - **Task**: one ordered, independently verifiable unit of work.
-- **Attempt**: one fresh Codex process for a task. Retries are new attempts.
+- **Attempt**: one fresh Codex process for planning or a task. Retries are new
+  attempts.
 - **Handoff**: bounded, verified context passed from one completed task to the
   immediately following task.
 - **Evidence**: agent telemetry, Git scope observations, and controller-run
@@ -22,10 +23,23 @@ cannot complete a task. A task completes only when:
 4. the agent did not change controller-owned run metadata; and
 5. controller-owned verification passed without changing the repository.
 
+Verification runs in a workspace-confined Codex permission profile. Its network
+proxy allows only `localhost` and `127.0.0.1`, so interaction tests may bind and
+call loopback services without gaining public-network access. A Python unittest
+or pytest command that reports skipped tests is not accepted as completion
+evidence even when the process exits successfully.
+
+Before a plan can become a draft, the controller compares Python write scopes
+with quality tools available on PATH. Installed Ruff and strict mypy/pyright
+tools must appear in both the responsible task verification and final verification; a
+missing gate becomes bounded rejection evidence for a fresh planner attempt.
+
 ## Context isolation
 
-Every planner, task, and retry call launches `codex exec --ephemeral`. Executor
-calls are never resumed or forked. A task prompt contains only:
+Every planner, task, and retry call launches `codex exec --ephemeral`. Calls are
+never resumed or forked. A rejected planner result is retried in a fresh process
+with only bounded controller rejection evidence; Git or controller-metadata
+mutation remains an immediate safety failure. A task prompt contains only:
 
 - the run goal;
 - the current task contract;

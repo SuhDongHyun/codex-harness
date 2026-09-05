@@ -5,9 +5,13 @@ import json
 from .models import Task
 
 
-def planning_prompt(goal: str) -> str:
-    return (
-        "Create a minimal sequential implementation plan for the exact goal below. "
+def planning_prompt(goal: str, last_error: str | None = None) -> str:
+    prompt = (
+        "Create a complete, minimal sequential implementation plan for the exact "
+        "goal below. Minimal means few tasks and a narrow change surface, never "
+        "reduced user-visible behavior or weaker proof of completion. Turn "
+        "underspecified product intent into concrete, observable acceptance "
+        "behavior in task objectives without narrowing the stated goal. "
         "Do not edit files. Return only the JSON object required by the output "
         "schema. Each task will run in a completely fresh Codex session, so every "
         "task must be self-contained and must name the exact repository files it "
@@ -20,12 +24,33 @@ def planning_prompt(goal: str) -> str:
         "The controller will calculate and pin source hashes. Use task IDs task-01, "
         "task-02, and so on in execution order. Keep one independently verifiable "
         "objective per task. Use narrow repository-relative write_paths. Express "
-        "verification as argv arrays without shell operators. Set network to false "
-        "unless that specific task genuinely needs outbound access. The final_verify "
-        "commands must prove the whole goal. Do not create planning-only, "
+        "verification as argv arrays without shell operators. Before choosing "
+        "verification, inspect project instructions, manifests, CI, and available "
+        "tooling. Include every applicable quality gate: focused and full tests, "
+        "lint and formatting checks, static type checks, build or compile checks, "
+        "and runtime or interaction smoke checks for user-visible behavior. Do not "
+        "treat one category, such as syntax compilation, as evidence for another. "
+        "For new code in an otherwise unconfigured repository, use standard tools "
+        "already available in the execution environment; never invent a command "
+        "that requires an unavailable tool or outbound installation. The "
+        "controller requires `ruff check` and `ruff format --check` in task and "
+        "final verification for Python write scopes when ruff is on PATH, plus "
+        "strict mypy (`mypy --strict`) or pyright when either executable is on "
+        "PATH. Set network "
+        "to false unless that specific task genuinely needs outbound access. The "
+        "final_verify commands must prove the whole goal across all applicable "
+        "quality categories. Do not create planning-only, "
         "review-only, commit, or push tasks. The goal field must equal this exact "
         "JSON string: "
         f"{json.dumps(goal, ensure_ascii=False)}.\n\nGoal:\n{goal}"
+    )
+    if last_error is None:
+        return prompt
+    return (
+        prompt
+        + "\n\nThe previous fresh planning attempt was rejected by the controller. "
+        "Return a corrected complete plan; do not defend or repeat the rejected "
+        "plan. Controller rejection evidence:\n" + last_error
     )
 
 

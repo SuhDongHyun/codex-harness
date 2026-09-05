@@ -1,15 +1,13 @@
 {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
   "type": "object",
   "additionalProperties": false,
   "required": ["goal", "context_sources", "tasks", "final_verify"],
   "properties": {
-    "goal": { "type": "string", "minLength": 1 },
+    "goal": { "type": "string" },
     "context_sources": {
       "type": "array",
       "maxItems": 100,
-      "uniqueItems": true,
-      "items": { "type": "string", "minLength": 1 }
+      "items": { "type": "string" }
     },
     "tasks": {
       "type": "array",
@@ -22,17 +20,17 @@
         "properties": {
           "id": { "type": "string", "pattern": "^task-[0-9]{2}$" },
           "name": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
-          "objective": { "type": "string", "minLength": 1 },
+          "objective": { "type": "string" },
           "read_files": {
             "type": "array",
             "maxItems": 100,
-            "items": { "type": "string", "minLength": 1 }
+            "items": { "type": "string" }
           },
           "write_paths": {
             "type": "array",
             "minItems": 1,
             "maxItems": 100,
-            "items": { "type": "string", "minLength": 1 }
+            "items": { "type": "string" }
           },
           "verify": {
             "type": "array",
@@ -42,7 +40,7 @@
               "type": "array",
               "minItems": 1,
               "maxItems": 100,
-              "items": { "type": "string", "minLength": 1 }
+              "items": { "type": "string" }
             }
           },
           "network": { "type": "boolean" }
@@ -57,7 +55,7 @@
         "type": "array",
         "minItems": 1,
         "maxItems": 100,
-        "items": { "type": "string", "minLength": 1 }
+        "items": { "type": "string" }
       }
     }
   }

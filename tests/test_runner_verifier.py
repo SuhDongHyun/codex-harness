@@ -42,7 +42,14 @@ class RunnerVerifierTests(unittest.TestCase):
         command = verifier._command(("python3", "-V"), Path("/tmp/project"))
 
         self.assertEqual(command[:2], ["codex-test", "sandbox"])
-        self.assertIn(":workspace", command)
+        self.assertIn("harness-verification", command)
+        self.assertIn('permissions.harness-verification.extends=":workspace"', command)
+        self.assertIn("permissions.harness-verification.network.enabled=true", command)
+        self.assertIn("features.network_proxy.enabled=true", command)
+        self.assertIn(
+            'features.network_proxy.domains={"localhost"="allow","127.0.0.1"="allow"}',
+            command,
+        )
         self.assertEqual(command[-2:], ["python3", "-V"])
         self.assertNotIn("bash", command)
 
@@ -55,6 +62,27 @@ class RunnerVerifierTests(unittest.TestCase):
 
         self.assertTrue(result.ok)
         self.assertEqual(result.commands[0].stdout, "verified\n")
+
+    def test_unittest_skip_is_not_accepted_as_verification(self) -> None:
+        verifier = Verifier("unused", 10, 4096, sandboxed=False)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "test_skip.py").write_text(
+                "import unittest\n"
+                "\n"
+                "class SkipTest(unittest.TestCase):\n"
+                "    @unittest.skip('missing required capability')\n"
+                "    def test_required_behavior(self):\n"
+                "        pass\n",
+                encoding="utf-8",
+            )
+            result = verifier.verify(
+                (("python3", "-m", "unittest", "-v", "test_skip"),), root
+            )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(result.commands[0].skipped_tests)
+        self.assertIn("reported skipped tests", result.failure_summary())
 
 
 if __name__ == "__main__":

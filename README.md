@@ -7,10 +7,15 @@ The controller, rather than the model, owns state and completion. It checks Git
 scope after every agent attempt and independently runs each task's verification
 commands before writing a bounded handoff for the next task.
 
+Verification is workspace-confined and has loopback-only network access for
+local service tests. Reported unittest or pytest skips fail verification rather
+than silently weakening completion evidence. For Python write scopes, available
+Ruff and strict mypy/pyright executables are mandatory task and final plan gates.
+
 ## Core workflow
 
 ```text
-goal -> plan -> approve -> task-01 (fresh session) -> verify -> handoff
+goal -> plan (fresh retry if rejected) -> approve -> task-01 (fresh session) -> verify -> handoff
                         -> task-02 (fresh session) -> verify -> handoff
                         -> final verification -> complete
 ```
@@ -48,7 +53,9 @@ $harness resume <run-id>
 $harness retry-task <run-id> <task-id|final>
 ```
 
-`plan` is read-only. Review `.harness/runs/<run-id>/plan.json` before approval.
+`plan` is read-only. Schema-invalid or approval-ineligible planner output is
+retried in a new ephemeral session with bounded rejection evidence. Review
+`.harness/runs/<run-id>/plan.json` before approval.
 The plan records the instruction and documentation files that informed it with
 controller-calculated SHA-256 hashes, and tasks name the applicable sources in
 their `read_files`. Approval rejects changed or writable context sources. `run`
