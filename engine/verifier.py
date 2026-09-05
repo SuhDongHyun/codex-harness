@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import tempfile
@@ -19,6 +20,7 @@ class CommandEvidence:
     stderr: str
     duration_seconds: float
     timed_out: bool
+    skipped_tests: bool = False
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -28,6 +30,7 @@ class CommandEvidence:
             "stderr": self.stderr,
             "duration_seconds": round(self.duration_seconds, 6),
             "timed_out": self.timed_out,
+            "skipped_tests": self.skipped_tests,
         }
 
 
@@ -47,6 +50,11 @@ class VerificationResult:
             return ""
         command = self.commands[-1]
         detail = command.stderr.strip() or command.stdout.strip() or "no output"
+        if command.skipped_tests:
+            return (
+                f"test command reported skipped tests: {' '.join(command.argv)}\n"
+                f"{detail}"
+            )
         return (
             f"command failed ({command.exit_code}): {' '.join(command.argv)}\n{detail}"
         )
@@ -100,13 +108,18 @@ class Verifier:
                         timed_out = True
                         _terminate(process)
                         process.wait()
+                stdout_text = _bounded(stdout_path, self.max_output_bytes)
+                stderr_text = _bounded(stderr_path, self.max_output_bytes)
                 item = CommandEvidence(
                     argv=argv,
                     exit_code=124 if timed_out else (process.returncode or 0),
-                    stdout=_bounded(stdout_path, self.max_output_bytes),
-                    stderr=_bounded(stderr_path, self.max_output_bytes),
+                    stdout=stdout_text,
+                    stderr=stderr_text,
                     duration_seconds=time.monotonic() - started,
                     timed_out=timed_out,
+                    skipped_tests=_reports_skipped_tests(
+                        argv, stdout_text, stderr_text
+                    ),
                 )
             except OSError as error:
                 item = CommandEvidence(
@@ -121,7 +134,7 @@ class Verifier:
                 stdout_path.unlink(missing_ok=True)
                 stderr_path.unlink(missing_ok=True)
             evidence.append(item)
-            if item.exit_code != 0:
+            if item.exit_code != 0 or item.skipped_tests:
                 return VerificationResult(False, tuple(evidence))
         return VerificationResult(True, tuple(evidence))
 
@@ -132,13 +145,19 @@ class Verifier:
             self.codex_command,
             "sandbox",
             "--permission-profile",
-            ":workspace",
+            "harness-verification",
             "--cd",
             str(cwd),
             "-c",
-            "sandbox_workspace_write.writable_roots=[]",
+            'permissions.harness-verification.extends=":workspace"',
             "-c",
-            "sandbox_workspace_write.network_access=false",
+            "permissions.harness-verification.network.enabled=true",
+            "-c",
+            "features.network_proxy.enabled=true",
+            "-c",
+            'features.network_proxy.domains={"localhost"="allow","127.0.0.1"="allow"}',
+            "-c",
+            "sandbox_workspace_write.writable_roots=[]",
             "--",
             "/usr/bin/env",
             "-u",
@@ -162,6 +181,18 @@ def _temporary_path() -> Path:
     descriptor, name = tempfile.mkstemp(prefix=".harness-verify-")
     os.close(descriptor)
     return Path(name)
+
+
+def _reports_skipped_tests(argv: tuple[str, ...], stdout: str, stderr: str) -> bool:
+    executable = Path(argv[0]).name.lower() if argv else ""
+    is_unittest = "unittest" in argv
+    is_pytest = executable.startswith("pytest") or "pytest" in argv
+    if not (is_unittest or is_pytest):
+        return False
+    output = stdout + "\n" + stderr
+    return (
+        re.search(r"\b(?:skipped(?:\s|=|:)|\d+\s+skipped\b)", output, re.I) is not None
+    )
 
 
 def _bounded(path: Path, limit: int) -> str:

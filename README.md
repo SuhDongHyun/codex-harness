@@ -7,6 +7,10 @@ The controller, rather than the model, owns state and completion. It checks Git
 scope after every agent attempt and independently runs each task's verification
 commands before writing a bounded handoff for the next task.
 
+Verification is workspace-confined and has loopback-only network access for
+local service tests. Reported unittest or pytest skips fail verification rather
+than silently weakening completion evidence.
+
 ## Core workflow
 
 ```text

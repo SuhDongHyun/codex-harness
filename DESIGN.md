@@ -23,6 +23,12 @@ cannot complete a task. A task completes only when:
 4. the agent did not change controller-owned run metadata; and
 5. controller-owned verification passed without changing the repository.
 
+Verification runs in a workspace-confined Codex permission profile. Its network
+proxy allows only `localhost` and `127.0.0.1`, so interaction tests may bind and
+call loopback services without gaining public-network access. A Python unittest
+or pytest command that reports skipped tests is not accepted as completion
+evidence even when the process exits successfully.
+
 ## Context isolation
 
 Every planner, task, and retry call launches `codex exec --ephemeral`. Calls are
